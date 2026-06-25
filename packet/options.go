@@ -29,6 +29,8 @@ const (
 	defaultBufferBytes        = 5000
 	defaultHeartbeatTime      = false
 	defaultHeartbeatTimeBytes = 8
+	defaultRouteUnsigned      = false
+	defaultSeqUnsigned        = false
 )
 
 const (
@@ -37,6 +39,8 @@ const (
 	defaultSeqBytesKey      = "etc.packet.seqBytes"
 	defaultBufferBytesKey   = "etc.packet.bufferBytes"
 	defaultHeartbeatTimeKey = "etc.packet.heartbeatTime"
+	defaultRouteUnsignedKey = "etc.packet.routeUnsigned"
+	defaultSeqUnsignedKey   = "etc.packet.seqUnsigned"
 )
 
 type options struct {
@@ -59,6 +63,15 @@ type options struct {
 	// 是否携带心跳时间
 	// 默认为false
 	heartbeatTime bool
+
+	// 路由号是否按无符号语义编解码
+	// 默认为false（有符号 int16，范围 [-32768, 32767]）
+	// 为true时按 uint16 语义，范围 [0, 65535]，消除负值符号扩展
+	routeUnsigned bool
+
+	// 序列号是否按无符号语义编解码
+	// 默认为false（有符号），为true时按无符号语义
+	seqUnsigned bool
 }
 
 type Option func(o *options)
@@ -70,6 +83,8 @@ func defaultOptions() *options {
 		seqBytes:      etc.Get(defaultSeqBytesKey, defaultSeqBytes).Int(),
 		bufferBytes:   etc.Get(defaultBufferBytesKey, defaultBufferBytes).Int(),
 		heartbeatTime: etc.Get(defaultHeartbeatTimeKey, defaultHeartbeatTime).Bool(),
+		routeUnsigned: etc.Get(defaultRouteUnsignedKey, defaultRouteUnsigned).Bool(),
+		seqUnsigned:   etc.Get(defaultSeqUnsignedKey, defaultSeqUnsigned).Bool(),
 	}
 
 	endian := etc.Get(defaultEndianKey, bigEndian).String()
@@ -106,4 +121,15 @@ func WithBufferBytes(bufferBytes int) Option {
 // WithHeartbeatTime 是否携带心跳时间
 func WithHeartbeatTime(heartbeatTime bool) Option {
 	return func(o *options) { o.heartbeatTime = heartbeatTime }
+}
+
+// WithRouteUnsigned 设置路由号是否按无符号语义编解码
+// 为true时路由号按 uint16 语义（范围 [0, 65535]），消除负值符号扩展风险
+func WithRouteUnsigned(routeUnsigned bool) Option {
+	return func(o *options) { o.routeUnsigned = routeUnsigned }
+}
+
+// WithSeqUnsigned 设置序列号是否按无符号语义编解码
+func WithSeqUnsigned(seqUnsigned bool) Option {
+	return func(o *options) { o.seqUnsigned = seqUnsigned }
 }

@@ -76,6 +76,42 @@ func NewPacker(opts ...Option) *defaultPacker {
 	}
 }
 
+// checkRouteOverflow 校验路由号是否落在 routeBytes 对应的有符号/无符号范围内。
+//
+// 有符号语义：范围 [-1<<(8n-1), 1<<(8n-1)-1]（n=2 即 [-32768, 32767]）。
+// 无符号语义：范围 [0, 1<<(8n)-1]（n=2 即 [0, 65535]）；Route 为 int32 仍可能为负，需显式拒绝。
+// 上界以 int 比较，避免 n=4 时 int32(1<<32-1) 截断为 -1 的陷阱。
+func (p *defaultPacker) checkRouteOverflow(route int32) error {
+	if p.opts.routeUnsigned {
+		if route < 0 || int(route) > 1<<(8*p.opts.routeBytes)-1 {
+			return errors.ErrRouteOverflow
+		}
+		return nil
+	}
+	if route > int32(1<<(8*p.opts.routeBytes-1)-1) || route < int32(-1<<(8*p.opts.routeBytes-1)) {
+		return errors.ErrRouteOverflow
+	}
+	return nil
+}
+
+// checkSeqOverflow 校验序列号是否落在 seqBytes 对应的有符号/无符号范围内。
+// seqBytes 为 0 时不编码序列号，直接放行。
+func (p *defaultPacker) checkSeqOverflow(seq int32) error {
+	if p.opts.seqBytes <= 0 {
+		return nil
+	}
+	if p.opts.seqUnsigned {
+		if seq < 0 || int(seq) > 1<<(8*p.opts.seqBytes)-1 {
+			return errors.ErrSeqOverflow
+		}
+		return nil
+	}
+	if seq > int32(1<<(8*p.opts.seqBytes-1)-1) || seq < int32(-1<<(8*p.opts.seqBytes-1)) {
+		return errors.ErrSeqOverflow
+	}
+	return nil
+}
+
 // ReadBuffer 以buffer的形式读取消息
 func (p *defaultPacker) ReadBuffer(reader io.Reader) (buffer.Buffer, error) {
 	buf1 := buffer.MallocBytes(defaultSizeBytes)
@@ -106,14 +142,12 @@ func (p *defaultPacker) ReadBuffer(reader io.Reader) (buffer.Buffer, error) {
 
 // PackBuffer 以buffer的形式打包消息
 func (p *defaultPacker) PackBuffer(message *Message) (*buffer.NocopyBuffer, error) {
-	if message.Route > int32(1<<(8*p.opts.routeBytes-1)-1) || message.Route < int32(-1<<(8*p.opts.routeBytes-1)) {
-		return nil, errors.ErrRouteOverflow
+	if err := p.checkRouteOverflow(message.Route); err != nil {
+		return nil, err
 	}
 
-	if p.opts.seqBytes > 0 {
-		if message.Seq > int32(1<<(8*p.opts.seqBytes-1)-1) || message.Seq < int32(-1<<(8*p.opts.seqBytes-1)) {
-			return nil, errors.ErrSeqOverflow
-		}
+	if err := p.checkSeqOverflow(message.Seq); err != nil {
+		return nil, err
 	}
 
 	if len(message.Buffer) > p.opts.bufferBytes {
@@ -128,7 +162,11 @@ func (p *defaultPacker) PackBuffer(message *Message) (*buffer.NocopyBuffer, erro
 	case 1:
 		writer.WriteInt8s(int8(message.Route))
 	case 2:
-		writer.WriteInt16s(p.opts.byteOrder, int16(message.Route))
+		if p.opts.routeUnsigned {
+			writer.WriteUint16s(p.opts.byteOrder, uint16(message.Route))
+		} else {
+			writer.WriteInt16s(p.opts.byteOrder, int16(message.Route))
+		}
 	case 4:
 		writer.WriteInt32s(p.opts.byteOrder, message.Route)
 	}
@@ -137,7 +175,11 @@ func (p *defaultPacker) PackBuffer(message *Message) (*buffer.NocopyBuffer, erro
 	case 1:
 		writer.WriteInt8s(int8(message.Seq))
 	case 2:
-		writer.WriteInt16s(p.opts.byteOrder, int16(message.Seq))
+		if p.opts.seqUnsigned {
+			writer.WriteUint16s(p.opts.byteOrder, uint16(message.Seq))
+		} else {
+			writer.WriteInt16s(p.opts.byteOrder, int16(message.Seq))
+		}
 	case 4:
 		writer.WriteInt32s(p.opts.byteOrder, message.Seq)
 	}
@@ -210,14 +252,12 @@ func (p *defaultPacker) nocopyReadMessage(reader NocopyReader) ([]byte, error) {
 
 // PackMessage 打包消息
 func (p *defaultPacker) PackMessage(message *Message) ([]byte, error) {
-	if message.Route > int32(1<<(8*p.opts.routeBytes-1)-1) || message.Route < int32(-1<<(8*p.opts.routeBytes-1)) {
-		return nil, errors.ErrRouteOverflow
+	if err := p.checkRouteOverflow(message.Route); err != nil {
+		return nil, err
 	}
 
-	if p.opts.seqBytes > 0 {
-		if message.Seq > int32(1<<(8*p.opts.seqBytes-1)-1) || message.Seq < int32(-1<<(8*p.opts.seqBytes-1)) {
-			return nil, errors.ErrSeqOverflow
-		}
+	if err := p.checkSeqOverflow(message.Seq); err != nil {
+		return nil, err
 	}
 
 	if len(message.Buffer) > p.opts.bufferBytes {
@@ -245,7 +285,11 @@ func (p *defaultPacker) PackMessage(message *Message) ([]byte, error) {
 	case 1:
 		err = binary.Write(buf, p.opts.byteOrder, int8(message.Route))
 	case 2:
-		err = binary.Write(buf, p.opts.byteOrder, int16(message.Route))
+		if p.opts.routeUnsigned {
+			err = binary.Write(buf, p.opts.byteOrder, uint16(message.Route))
+		} else {
+			err = binary.Write(buf, p.opts.byteOrder, int16(message.Route))
+		}
 	case 4:
 		err = binary.Write(buf, p.opts.byteOrder, message.Route)
 	}
@@ -257,7 +301,11 @@ func (p *defaultPacker) PackMessage(message *Message) ([]byte, error) {
 	case 1:
 		err = binary.Write(buf, p.opts.byteOrder, int8(message.Seq))
 	case 2:
-		err = binary.Write(buf, p.opts.byteOrder, int16(message.Seq))
+		if p.opts.seqUnsigned {
+			err = binary.Write(buf, p.opts.byteOrder, uint16(message.Seq))
+		} else {
+			err = binary.Write(buf, p.opts.byteOrder, int16(message.Seq))
+		}
 	case 4:
 		err = binary.Write(buf, p.opts.byteOrder, message.Seq)
 	}
@@ -315,11 +363,20 @@ func (p *defaultPacker) UnpackMessage(data []byte) (*Message, error) {
 			message.Route = int32(route)
 		}
 	case 2:
-		var route int16
-		if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
-			return nil, err
+		if p.opts.routeUnsigned {
+			var route uint16
+			if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
+				return nil, err
+			} else {
+				message.Route = int32(route)
+			}
 		} else {
-			message.Route = int32(route)
+			var route int16
+			if err = binary.Read(reader, p.opts.byteOrder, &route); err != nil {
+				return nil, err
+			} else {
+				message.Route = int32(route)
+			}
 		}
 	case 4:
 		var route int32
@@ -339,11 +396,20 @@ func (p *defaultPacker) UnpackMessage(data []byte) (*Message, error) {
 			message.Seq = int32(seq)
 		}
 	case 2:
-		var seq int16
-		if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
-			return nil, err
+		if p.opts.seqUnsigned {
+			var seq uint16
+			if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
+				return nil, err
+			} else {
+				message.Seq = int32(seq)
+			}
 		} else {
-			message.Seq = int32(seq)
+			var seq int16
+			if err = binary.Read(reader, p.opts.byteOrder, &seq); err != nil {
+				return nil, err
+			} else {
+				message.Seq = int32(seq)
+			}
 		}
 	case 4:
 		var seq int32
