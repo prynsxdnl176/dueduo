@@ -29,6 +29,10 @@ func (p *provider) Bind(ctx context.Context, cid, uid int64) error {
 		return err
 	}
 
+	if ip, err := p.gate.session.RemoteIP(session.Conn, cid); err == nil {
+		log.Infof("[gate] 用户绑定 cid=%d uid=%d ip=%s", cid, uid, ip)
+	}
+
 	return nil
 }
 

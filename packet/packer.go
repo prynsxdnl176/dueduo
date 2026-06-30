@@ -35,6 +35,13 @@ type Packer interface {
 	ReadBuffer(reader io.Reader) (buffer.Buffer, error)
 	// PackBuffer 以buffer的形式打包消息
 	PackBuffer(message *Message) (*buffer.NocopyBuffer, error)
+	// PackBufferWith 以buffer的形式打包消息，载荷为池化 *buffer.Bytes（而非裸 []byte）。
+	//
+	// 与 PackBuffer 的区别：载荷经 NocopyNode{block: *Bytes} 挂载，Release 时
+	// *Bytes 归其来源池（如 BoundedBytesPool，带 cap 超限丢弃语义），消除
+	// PackBuffer 路径中 []byte 节点 Release=ignore 的未池化分配。不改 packet.Message.Buffer
+	// 字段类型（仍 []byte），避免 PackMessage/UnpackMessage ripple。
+	PackBufferWith(seq, route int32, payload *buffer.Bytes) (*buffer.NocopyBuffer, error)
 	// ReadMessage 读取消息
 	ReadMessage(reader io.Reader) ([]byte, error)
 	// PackMessage 打包消息
@@ -185,6 +192,67 @@ func (p *defaultPacker) PackBuffer(message *Message) (*buffer.NocopyBuffer, erro
 	}
 
 	return buffer.NewNocopyBuffer(writer, message.Buffer), nil
+}
+
+// PackBufferWith 以buffer的形式打包消息，载荷为池化 *buffer.Bytes。
+//
+// 复用 PackBuffer 的 route/seq 溢出校验与头部编码（MallocWriter），末尾以
+// NewNocopyBuffer(writer, payload) 挂载 *Bytes。Mount 对 *Bytes 创建
+// NocopyNode{block: *Bytes}，NocopyNode.Release 调 b.Release() 归其来源池
+// （BoundedBytesPool，cap 超限丢弃）。payload.Len() 为序列化产物长度，参与
+// 包体长度头与 bufferBytes 上限校验。
+func (p *defaultPacker) PackBufferWith(seq, route int32, payload *buffer.Bytes) (*buffer.NocopyBuffer, error) {
+	if err := p.checkRouteOverflow(route); err != nil {
+		return nil, err
+	}
+
+	if err := p.checkSeqOverflow(seq); err != nil {
+		return nil, err
+	}
+
+	payloadLen := 0
+	if payload != nil {
+		payloadLen = payload.Len()
+	}
+
+	if payloadLen > p.opts.bufferBytes {
+		return nil, errors.ErrMessageTooLarge
+	}
+
+	writer := buffer.MallocWriter(defaultSizeBytes + defaultHeaderBytes + p.opts.routeBytes + p.opts.seqBytes)
+	writer.WriteInt32s(p.opts.byteOrder, int32(defaultHeaderBytes+p.opts.routeBytes+p.opts.seqBytes+payloadLen))
+	writer.WriteInt8s(int8(dataBit))
+
+	switch p.opts.routeBytes {
+	case 1:
+		writer.WriteInt8s(int8(route))
+	case 2:
+		if p.opts.routeUnsigned {
+			writer.WriteUint16s(p.opts.byteOrder, uint16(route))
+		} else {
+			writer.WriteInt16s(p.opts.byteOrder, int16(route))
+		}
+	case 4:
+		writer.WriteInt32s(p.opts.byteOrder, route)
+	}
+
+	switch p.opts.seqBytes {
+	case 1:
+		writer.WriteInt8s(int8(seq))
+	case 2:
+		if p.opts.seqUnsigned {
+			writer.WriteUint16s(p.opts.byteOrder, uint16(seq))
+		} else {
+			writer.WriteInt16s(p.opts.byteOrder, int16(seq))
+		}
+	case 4:
+		writer.WriteInt32s(p.opts.byteOrder, seq)
+	}
+
+	if payload != nil {
+		return buffer.NewNocopyBuffer(writer, payload), nil
+	}
+	return buffer.NewNocopyBuffer(writer), nil
 }
 
 // ReadMessage 读取消息

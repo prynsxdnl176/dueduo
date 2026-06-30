@@ -32,6 +32,11 @@ func PackBuffer(message *Message) (*buffer.NocopyBuffer, error) {
 	return globalPacker.PackBuffer(message)
 }
 
+// PackBufferWith 以buffer的形式打包消息，载荷为池化 *buffer.Bytes。
+func PackBufferWith(seq, route int32, payload *buffer.Bytes) (*buffer.NocopyBuffer, error) {
+	return globalPacker.PackBufferWith(seq, route, payload)
+}
+
 // ReadMessage 读取消息
 func ReadMessage(reader io.Reader) ([]byte, error) {
 	return globalPacker.ReadMessage(reader)

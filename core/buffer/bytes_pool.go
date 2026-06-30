@@ -16,6 +16,12 @@ type BytesPool struct {
 	pools []*sync.Pool
 }
 
+// syncPoolReleaser 将 *sync.Pool 适配为 bytesReleaser，保持 BytesPool 原有
+// “无丢弃、分级复用”语义。*Bytes.Release 经接口分发到此处，最终落到对应分级池。
+type syncPoolReleaser struct{ Pool *sync.Pool }
+
+func (r *syncPoolReleaser) Put(b *Bytes) { r.Pool.Put(b) }
+
 // NewBytesPool 分级创建字节池
 func NewBytesPool(grade int) *BytesPool {
 	p := &BytesPool{}
@@ -24,7 +30,7 @@ func NewBytesPool(grade int) *BytesPool {
 	for i := range grade + 1 {
 		cap := 1 << i
 		pool := &sync.Pool{}
-		pool.New = func() any { return &Bytes{buf: make([]byte, cap), off: cap, pool: pool} }
+		pool.New = func() any { return &Bytes{buf: make([]byte, cap), off: cap, pool: &syncPoolReleaser{Pool: pool}} }
 		p.pools[i] = pool
 	}
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/dobyte/due/v2/core/buffer"
 	derrors "github.com/dobyte/due/v2/errors"
 	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/utils/xrand"
@@ -312,6 +313,99 @@ func BenchmarkDefaultPacker_ReadMessage(b *testing.B) {
 		}
 
 		reader.Reset(data)
+	}
+}
+
+// TestPackBuffer_WithBytes 验证 PackBufferWith（载荷为池化 *buffer.Bytes）与
+// PackBuffer（载荷为裸 []byte）产出等价字节流，且 *Bytes 经 Release 归池。
+func TestPackBuffer_WithBytes(t *testing.T) {
+	bp := buffer.NewBoundedBytesPool(16, 64*1024)
+	payload := []byte("hello world")
+
+	// 池化 *Bytes 载荷
+	pb := bp.Get(len(payload))
+	out := append(pb.Writable(), payload...)
+	pb.SetLen(len(out))
+
+	got, err := packer.PackBufferWith(1, 1, pb)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 参照：裸 []byte 路径
+	want, err := packer.PackBuffer(&packet.Message{Seq: 1, Route: 1, Buffer: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !bytes.Equal(got.Bytes(), want.Bytes()) {
+		t.Fatalf("PackBufferWith 与 PackBuffer 产出不一致:\n got=%v\nwant=%v", got.Bytes(), want.Bytes())
+	}
+
+	// 解包验证往返
+	msg, err := packer.UnpackMessage(got.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Seq != 1 || msg.Route != 1 || string(msg.Buffer) != "hello world" {
+		t.Fatalf("unpack mismatch: seq=%d route=%d buffer=%q", msg.Seq, msg.Route, msg.Buffer)
+	}
+
+	got.Release()  // 级联释放 *Bytes 归 BoundedBytesPool
+	want.Release() // 释放 writer 节点
+}
+
+// TestPackBuffer_WithBytesNil 验证 payload=nil 时不 panic，产出空载荷包。
+func TestPackBuffer_WithBytesNil(t *testing.T) {
+	got, err := packer.PackBufferWith(1, 1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := packer.UnpackMessage(got.Bytes())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if msg.Seq != 1 || msg.Route != 1 || len(msg.Buffer) != 0 {
+		t.Fatalf("nil payload mismatch: seq=%d route=%d buffer=%v", msg.Seq, msg.Route, msg.Buffer)
+	}
+	got.Release()
+}
+
+// TestPackBuffer_WithBytesOverflow 验证 PackBufferWith 的 bufferBytes 上限校验。
+func TestPackBuffer_WithBytesOverflow(t *testing.T) {
+	p := packet.NewPacker(packet.WithBufferBytes(100))
+	bp := buffer.NewBoundedBytesPool(16, 64*1024)
+	big := bp.Get(200)
+	big.SetLen(200)
+
+	_, err := p.PackBufferWith(1, 1, big)
+	if err != derrors.ErrMessageTooLarge {
+		t.Fatalf("want ErrMessageTooLarge, got %v", err)
+	}
+	big.Release()
+}
+
+// BenchmarkPackBuffer_WithBytes 对比 PackBufferWith（池化 *Bytes 载荷）与
+// PackBuffer（裸 []byte 载荷）。稳态下 PackBufferWith 的 *Bytes 归池复用，
+// allocs/op 应低于 PackBuffer 的裸 []byte 节点路径。
+func BenchmarkPackBuffer_WithBytes(b *testing.B) {
+	bp := buffer.NewBoundedBytesPool(16, 64*1024)
+	payload := []byte(xrand.Letters(1024))
+
+	b.ReportAllocs()
+	b.SetBytes(int64(len(payload)))
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		pb := bp.Get(len(payload))
+		out := append(pb.Writable(), payload...)
+		pb.SetLen(len(out))
+
+		buf, err := packer.PackBufferWith(1, 1, pb)
+		if err != nil {
+			b.Fatal(err)
+		}
+		buf.Release()
 	}
 }
 

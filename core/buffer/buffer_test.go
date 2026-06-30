@@ -79,6 +79,30 @@ func BenchmarkNocopyBuffer_Malloc(b *testing.B) {
 	}
 }
 
+// BenchmarkNocopyBuffer_MountBytes 对比挂载 *Bytes:
+// 指针装箱到 any 不分配，NocopyBuffer/NocopyNode 经 sync.Pool 复用，
+// 稳态目标 0 allocs/op。与 BenchmarkNocopyBuffer_Malloc（挂载 []byte，含
+// []byte→any 两次装箱）形成对比，说明选用 *Bytes 而非裸 []byte 的理由。
+func BenchmarkNocopyBuffer_MountBytes(b *testing.B) {
+	bp := buffer.NewBoundedBytesPool(16, 64*1024)
+	// 预热池
+	warm := buffer.NewNocopyBuffer()
+	wp := bp.Get(16)
+	wp.SetLen(16)
+	warm.Mount(wp)
+	warm.Release()
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	for i := 0; i < b.N; i++ {
+		pb := bp.Get(16)
+		pb.SetLen(16)
+		buf := buffer.NewNocopyBuffer(pb)
+		buf.Release()
+	}
+}
+
 func TestNewBuffer2(t *testing.T) {
 	buff := buffer.NewNocopyBuffer()
 

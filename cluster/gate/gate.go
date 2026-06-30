@@ -144,6 +144,10 @@ func (g *Gate) stopNetworkServer() {
 
 // 处理连接打开
 func (g *Gate) handleConnect(conn network.Conn) {
+	if addr, err := conn.RemoteAddr(); err == nil {
+		log.Infof("[gate] 连接建立 cid=%d remote=%s", conn.ID(), addr.String())
+	}
+
 	g.wg.Add(1)
 
 	g.session.AddConn(conn)
@@ -155,6 +159,10 @@ func (g *Gate) handleConnect(conn network.Conn) {
 
 // 处理断开连接
 func (g *Gate) handleDisconnect(conn network.Conn) {
+	if addr, err := conn.RemoteAddr(); err == nil {
+		log.Infof("[gate] 连接断开 cid=%d uid=%d remote=%s", conn.ID(), conn.UID(), addr.String())
+	}
+
 	g.session.RemConn(conn)
 
 	cid, uid := conn.ID(), conn.UID()

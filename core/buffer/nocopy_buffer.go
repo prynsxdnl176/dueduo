@@ -1,8 +1,33 @@
 package buffer
 
 import (
+	"sync"
 	"sync/atomic"
 )
+
+// nocopyBufferPool 复用 *NocopyBuffer，消除 NewNocopyBuffer 中的 &NocopyBuffer{}
+// 字面量堆分配。Release 在 delay 计数器归零并清空链表字段后归池；
+// acquireNocopyBuffer 取出时重置 delay/released 原子与链表字段。
+var nocopyBufferPool = sync.Pool{
+	New: func() any { return &NocopyBuffer{} },
+}
+
+// acquireNocopyBuffer 从池取一个干净的 NocopyBuffer。
+//
+// 必须重置：delay（防上个使用者的延迟计数残留导致本次 Release 提前/延后）、
+// released（防 CAS 守卫误判）、len/num/链表指针（对齐 NewNocopyBuffer 初值）。
+func acquireNocopyBuffer() *NocopyBuffer {
+	b := nocopyBufferPool.Get().(*NocopyBuffer)
+	b.delay.Store(0)
+	b.released.Store(false)
+	b.len = -1
+	b.num = 0
+	b.head = nil
+	b.tail = nil
+	b.prev = nil
+	b.next = nil
+	return b
+}
 
 type NocopyBuffer struct {
 	len      int          // 字节数
@@ -18,7 +43,7 @@ type NocopyBuffer struct {
 var _ Buffer = &NocopyBuffer{}
 
 func NewNocopyBuffer(blocks ...any) *NocopyBuffer {
-	buf := &NocopyBuffer{len: -1}
+	buf := acquireNocopyBuffer()
 
 	for _, block := range blocks {
 		buf.Mount(block)
@@ -57,22 +82,28 @@ func (b *NocopyBuffer) Len() int {
 func (b *NocopyBuffer) Mount(block any, whence ...Whence) {
 	switch v := block.(type) {
 	case []byte:
+		n := acquireNocopyNode()
+		n.block = v
 		if len(whence) > 0 && whence[0] == Head {
-			b.addToHead(&NocopyNode{block: v})
+			b.addToHead(n)
 		} else {
-			b.addToTail(&NocopyNode{block: v})
+			b.addToTail(n)
 		}
 	case *Bytes:
+		n := acquireNocopyNode()
+		n.block = v
 		if len(whence) > 0 && whence[0] == Head {
-			b.addToHead(&NocopyNode{block: v})
+			b.addToHead(n)
 		} else {
-			b.addToTail(&NocopyNode{block: v})
+			b.addToTail(n)
 		}
 	case *Writer:
+		n := acquireNocopyNode()
+		n.block = v
 		if len(whence) > 0 && whence[0] == Head {
-			b.addToHead(&NocopyNode{block: v})
+			b.addToHead(n)
 		} else {
-			b.addToTail(&NocopyNode{block: v})
+			b.addToTail(n)
 		}
 	default:
 		if len(whence) > 0 && whence[0] == Head {
@@ -200,6 +231,8 @@ func (b *NocopyBuffer) Release() {
 	b.tail = nil
 	b.prev = nil
 	b.next = nil
+
+	nocopyBufferPool.Put(b)
 }
 
 // 添加到头部

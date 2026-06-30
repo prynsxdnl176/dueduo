@@ -18,6 +18,7 @@ import (
 	"github.com/dobyte/due/v2/registry"
 	"github.com/dobyte/due/v2/session"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 )
 
 type GateLinker struct {
@@ -769,7 +770,28 @@ func (l *GateLinker) doBuildClient(gid string) (*gate.Client, error) {
 }
 
 // PackMessage 打包消息
+//
+// proto 路径特化：当未配置加密器（l.opts.Encryptor == nil）且 Data 为
+// proto.Message 时，走 marshalPooled + PackBufferWith 池化路径——序列化产物
+// 追加到 BoundedBytesPool 的 *Bytes，经 NocopyNode 挂载，Release 时归池
+// （cap 超限丢弃），消除 Codec.Marshal 内部 proto.Marshal 的裸 []byte 分配。
+//
+// 条件用 l.opts.Encryptor == nil 而非 !encrypt：所有调用点（Reply→Push、
+// Push、Multicast、Broadcast）均传 encrypt=true，但加密仅当 encrypt && Encryptor!=nil
+// 时发生；Encryptor==nil 时 encrypt 标志无效，加密永不发生，故池化路径安全。
+// 项目未启用加密（casualserver 无 Encryptor 配置），走特化路径；配置了加密器
+// 的其他 due 用户回落原 Codec.Marshal 路径（产出裸 []byte，行为不变）。
 func (l *GateLinker) PackMessage(message *Message, encrypt bool) (*buffer.NocopyBuffer, error) {
+	if l.opts.Encryptor == nil {
+		if pm, ok := message.Data.(proto.Message); ok {
+			payload, err := marshalPooled(pm)
+			if err != nil {
+				return nil, err
+			}
+			return packet.PackBufferWith(message.Seq, message.Route, payload)
+		}
+	}
+
 	buf, err := l.PackBuffer(message.Data, encrypt)
 	if err != nil {
 		return nil, err

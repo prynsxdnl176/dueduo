@@ -16,6 +16,7 @@ import (
 	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/registry"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/protobuf/proto"
 )
 
 type NodeLinker struct {
@@ -186,7 +187,9 @@ func (l *NodeLinker) Deliver(ctx context.Context, args *DeliverArgs) error {
 		buf = b
 	case *Message:
 		if buf, err = l.PackMessage(b, false); err != nil {
-			buf.Release()
+			if buf != nil {
+				buf.Release()
+			}
 			return err
 		}
 	default:
@@ -343,7 +346,21 @@ func (l *NodeLinker) doBuildClient(nid string) (*node.Client, error) {
 }
 
 // 打包消息
+//
+// proto 路径特化（P2）：与 GateLinker.PackMessage 同构。Encryptor==nil 且 Data
+// 为 proto.Message 时走 marshalPooled + PackBufferWith 池化路径；否则回落原
+// Codec.Marshal 路径。详见 GateLinker.PackMessage 注释。
 func (l *NodeLinker) PackMessage(message *Message, encrypt bool) (*buffer.NocopyBuffer, error) {
+	if l.opts.Encryptor == nil {
+		if pm, ok := message.Data.(proto.Message); ok {
+			payload, err := marshalPooled(pm)
+			if err != nil {
+				return nil, err
+			}
+			return packet.PackBufferWith(message.Seq, message.Route, payload)
+		}
+	}
+
 	buffer, err := l.PackBuffer(message.Data, encrypt)
 	if err != nil {
 		return nil, err
