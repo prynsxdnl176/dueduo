@@ -17,10 +17,30 @@ import (
 	"github.com/dobyte/due/v2/locate"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/network"
+	"github.com/dobyte/due/v2/packet"
 	"github.com/dobyte/due/v2/registry"
 	"github.com/dobyte/due/v2/utils/xconv"
 	"github.com/dobyte/due/v2/utils/xuuid"
 )
+
+// ReceiveMiddleware 网关入站消息中间件（doomscamp 边缘限流 patch）。
+//
+// 在 gate.proxy.deliver 单次解包（packet.UnpackMessage）后、转发 Node 前调用。
+// 返回 allow=true 放行转发；返回 allow=false 则不再 nodeLinker.Deliver，由中间件
+// 自行回发错误包（如 SCError）并可在违例达阈值时踢人。
+//
+// 透传 conn 供中间件取 RemoteIP（pre-auth 按 IP 限流）与回发/断连；
+// cid/uid 单独传入（uid 在 post-login 经 Bind 填充，pre-auth 为 0）；
+// msg 为已解包的 packet.Message（含 Seq/Route/Buffer）。
+//
+// nil（默认）= 不拦截，行为与未 patch 完全一致（向后兼容，不影响共享本 fork 的其它项目）。
+type ReceiveMiddleware func(ctx context.Context, conn network.Conn, cid, uid int64, msg *packet.Message) (allow bool)
+
+// DisconnectHook 网关断连钩子（doomscamp 边缘限流 patch）。
+//
+// 在 gate.handleDisconnect 既有逻辑（unbindGate + trigger Disconnect）之后调用，
+// 供应用层释放 per-uid/per-cid 限流桶等资源。nil（默认）= 不调用，向后兼容。
+type DisconnectHook func(conn network.Conn)
 
 const (
 	defaultName              = "gate"         // 默认名称
@@ -71,6 +91,8 @@ type options struct {
 	writeTimeout      time.Duration     // 内部RPC写入超时时间
 	writeQueueSize    int32             // 内部RPC写入队列大小
 	faultRecoveryTime time.Duration     // 内部RPC故障恢复时间
+	receiveMiddleware ReceiveMiddleware  // 入站消息中间件（边缘限流 patch），nil=不拦截
+	disconnectHook    DisconnectHook    // 断连钩子（边缘限流 patch），nil=不调用
 }
 
 func defaultOptions() *options {
@@ -333,6 +355,34 @@ func WithMetadata(metadata map[string]string) Option {
 			maps.Copy(o.metadata, metadata)
 		} else {
 			log.Warnf("the specified metadata is empty and will be ignored")
+		}
+	}
+}
+
+// WithReceiveMiddleware 设置入站消息中间件（边缘限流 patch）。
+//
+// 中间件在 deliver 单次解包后、转发 Node 前调用；返回 false 则不转发，由中间件
+// 自行回发错误包。nil 视为不设置（向后兼容）。
+func WithReceiveMiddleware(fn ReceiveMiddleware) Option {
+	return func(o *options) {
+		if fn != nil {
+			o.receiveMiddleware = fn
+		} else {
+			log.Warnf("the specified receiveMiddleware is nil and will be ignored")
+		}
+	}
+}
+
+// WithDisconnectHook 设置断连钩子（边缘限流 patch）。
+//
+// 钩子在 handleDisconnect 既有逻辑之后调用，供应用层释放 per-uid/per-cid 限流桶。
+// nil 视为不设置（向后兼容）。
+func WithDisconnectHook(fn DisconnectHook) Option {
+	return func(o *options) {
+		if fn != nil {
+			o.disconnectHook = fn
+		} else {
+			log.Warnf("the specified disconnectHook is nil and will be ignored")
 		}
 	}
 }

@@ -175,6 +175,11 @@ func (g *Gate) handleDisconnect(conn network.Conn) {
 
 	g.proxy.trigger(g.ctx, cluster.Disconnect, cid, uid)
 
+	// 边缘限流 patch：通知应用层释放 per-uid/per-cid 限流桶（nil=不调用，向后兼容）。
+	if g.opts.disconnectHook != nil {
+		g.opts.disconnectHook(conn)
+	}
+
 	g.wg.Done()
 }
 
@@ -182,7 +187,7 @@ func (g *Gate) handleDisconnect(conn network.Conn) {
 func (g *Gate) handleReceive(conn network.Conn, data []byte) {
 	cid, uid := conn.ID(), conn.UID()
 
-	g.proxy.deliver(g.ctx, cid, uid, data)
+	g.proxy.deliver(g.ctx, conn, cid, uid, data)
 }
 
 // 启动传输服务器

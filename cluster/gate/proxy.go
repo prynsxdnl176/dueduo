@@ -8,6 +8,7 @@ import (
 	"github.com/dobyte/due/v2/internal/link"
 	"github.com/dobyte/due/v2/log"
 	"github.com/dobyte/due/v2/mode"
+	"github.com/dobyte/due/v2/network"
 	"github.com/dobyte/due/v2/packet"
 )
 
@@ -76,11 +77,19 @@ func (p *proxy) trigger(ctx context.Context, event cluster.Event, cid, uid int64
 }
 
 // 投递消息
-func (p *proxy) deliver(ctx context.Context, cid, uid int64, data []byte) {
+func (p *proxy) deliver(ctx context.Context, conn network.Conn, cid, uid int64, data []byte) {
 	message, err := packet.UnpackMessage(data)
 	if err != nil {
 		log.Errorf("unpack message failed: %v", err)
 		return
+	}
+
+	// 边缘限流 patch：单次解包后调用入站中间件；返回 false 则不转发 Node，
+	// 由中间件自行回发错误包（如 SCError）/踢人。nil = 不拦截（向后兼容）。
+	if mw := p.gate.opts.receiveMiddleware; mw != nil {
+		if !mw(ctx, conn, cid, uid, message) {
+			return
+		}
 	}
 
 	if err = p.nodeLinker.Deliver(ctx, &link.DeliverArgs{
